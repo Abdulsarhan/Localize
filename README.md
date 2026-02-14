@@ -1,4 +1,4 @@
-# Localization File Format.
+# Localization File Format
 
 Limitations: This format only works if all of your strings are utf-8
 
@@ -16,7 +16,6 @@ To use the loader, define LOC_IMPLEMENTATION in one file, and include in all the
 #define LOC_IMPLEMENTATION
 #include "loc.h"
 ```
-
 ## Basic Usage for the Localization File Generator
 This example generates three files: one for english, one for french, and one for spanish.
 The format of the file looks like this:
@@ -38,7 +37,7 @@ int main(void) {
 
     /* null-terminated string. You can just use printf on it */
     const char *loc_string = loc_get_string(&file, "hi there!");
-    printf("%s\n", loc_string);
+    printf("%s\n", loc_string); /* Bonjour! */
 
     loc_free(file);
 
