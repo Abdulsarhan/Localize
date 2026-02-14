@@ -19,10 +19,14 @@ To use the loader, define LOC_IMPLEMENTATION in one file, and include in all the
 ## Basic Usage for the Localization File Generator
 This example generates three files: one for english, one for french, and one for spanish.
 The format of the file looks like this:
-hello | bonjour | buenas dias
-thank you | merci | Gracias
+shell:
 ```sh
 loc_gen strings.txt en fr sp
+```
+Where strings.txt looks like this:
+```
+hello | bonjour | buenas dias
+thank you | merci | Gracias
 ```
 ## Basic Usage for the Localization File loader
 ```C
