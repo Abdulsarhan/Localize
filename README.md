@@ -1,10 +1,14 @@
 # Localization File Format.
 
+Limitations: This format only works if all of your strings are utf-8
+
+
+This library is made up of the generator and the runtime loader.
+loc_file_gen.c is the generator and loc.h is the loader.
+The generator takes in a file where you can type in all the strings that you want in all the languages that you want.
 And converts it to a custom file format that has an offset table and the strings.
 We avoid hash collisions in the offset table by making the table 8x bigger than what is necessary.
 This made the implementation simpler, but if it presents any problems, I am happy to change it to use closed / open addressing.
-This library is made up of the generator and the runtime loader.
-loc_file_gen.c is the generator and loc.h is the loader.
 To compile the generator, just do:
 `` cc loc_file_gen.c -o loc_gen ``
 To use the loader, define LOC_IMPLEMENTATION in one file, and include in all the others.
@@ -12,7 +16,6 @@ To use the loader, define LOC_IMPLEMENTATION in one file, and include in all the
 #define LOC_IMPLEMENTATION
 #include "loc.h"
 ```
-THIS FORMAT ONLY WORKS IF ALL OF YOUR STRINGS ARE UTF-8.
 
 ## Basic Usage for the Localization File Generator
 This example generates three files: one for english, one for french, and one for spanish.
