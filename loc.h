@@ -1,3 +1,30 @@
+/* loc_runtime.h - v0.2 - localization runtime loader
+ *
+ * USAGE:
+ *   #define LOC_RUNTIME_IMPLEMENTATION
+ *   #include "loc_runtime.h"
+ *
+ *   // Load from file
+ *   loc_file loc = loc_load("strings.en.loc");
+ *   
+ *   // Get strings by English key
+ *   const char *text = loc_get_string(&loc, "hello");
+ *   
+ *   // Clean up when done
+ *   loc_free(&loc);
+ *
+ * FILE FORMAT:
+ *   [bucket_offset_table_size] - (size_t) size of bucket_offset_table in bytes.
+ *   [bucket_offset_table]      - (size_t array), one offset per bucket. Offsets are relative to start of bucket_list.
+ *   [bucket_list_size]         - (size_t) size of bucket_list in bytes.
+ *   [bucket_list]              - each bucket is: offset_count (size_t) + offsets_to_strings (count * size_t) offsets are relative to start of strings.
+ *   [strings_size]             - (size_t) size of the strings section in bytes.
+ *   [strings]                  - each entry is: english_key (null-terminated) + localized_string (null-terminated)
+ *
+ * LICENSE:
+ *   MIT.
+ */
+
 #ifndef LOC_H
 #define LOC_H
 
@@ -18,16 +45,19 @@
     #define LOCAPI extern
 #endif // LOCAPI
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct {
     unsigned char *file_buffer;
-    size_t *offset_table;
-    unsigned char *string_data;
-    size_t table_size;
-    size_t data_size;
+    size_t *bucket_offset_table;
+    unsigned char *bucket_list;
+    unsigned char *strings;
+    size_t bucket_count;
+    size_t bucket_list_size;
+    size_t strings_size;
 } loc_file;
 
 LOCAPI loc_file loc_load(const char *file_path);
@@ -40,6 +70,10 @@ LOCAPI void loc_free(loc_file *loc);
 
 #endif /* LOC_H */
 
+/* ===========================================================================
+ *                          IMPLEMENTATION
+ * ===========================================================================
+ */
 #ifdef LOC_IMPLEMENTATION
 
 #include <stdlib.h>
@@ -64,6 +98,20 @@ static uint32_t loc_hash_string(const char *str) {
     }
     
     return hash;
+}
+
+static size_t loc_strlen(const char *str) {
+    const char *s = str;
+    while (*s) s++;
+    return s - str;
+}
+
+static int loc_strcmp(const char *s1, const char *s2) {
+    while (*s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+    }
+    return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
 static size_t loc_get_file_size(const char *file_path) {
@@ -150,73 +198,88 @@ LOCAPI loc_file loc_load(const char *file_path) {
     size_t file_size = 0;
     
     loc.file_buffer = loc_read_entire_file(file_path, &file_size);
-    if (!loc.file_buffer || file_size < sizeof(size_t)) {
+    if (!loc.file_buffer || file_size < sizeof(size_t) * 3) {
         return loc;
     }
     
-    /* Parse the file structure */
-    size_t *offsets = (size_t *)loc.file_buffer;
+    unsigned char *ptr = loc.file_buffer;
     
-    /* Find table size by finding first non-zero offset */
-    size_t first_data_offset = 0;
-    size_t max_scan = file_size / sizeof(size_t);
+    // Read bucket offset table size
+    size_t bucket_offset_table_size = *((size_t *)ptr);
+    ptr += sizeof(size_t);
     
-    for(size_t i = 0; i < max_scan; i++) {
-        if(offsets[i] != 0) {
-            first_data_offset = offsets[i];
-            break;
-        }
-    }
+    // Read bucket offset table
+    loc.bucket_offset_table = (size_t *)ptr;
+    loc.bucket_count = bucket_offset_table_size / sizeof(size_t);
+    ptr += bucket_offset_table_size;
     
-    if(first_data_offset > 0) {
-        loc.table_size = first_data_offset / sizeof(size_t);
-    } else {
-        free(loc.file_buffer);
-        loc.file_buffer = NULL;
-        return loc;
-    }
+    // Read bucket list size
+    loc.bucket_list_size = *((size_t *)ptr);
+    ptr += sizeof(size_t);
     
-    size_t header_size = loc.table_size * sizeof(size_t);
+    // Read bucket list
+    loc.bucket_list = ptr;
+    ptr += loc.bucket_list_size;
     
-    if(file_size < header_size) {
-        free(loc.file_buffer);
-        loc.file_buffer = NULL;
-        loc.table_size = 0;
-        return loc;
-    }
+    // Read strings size
+    loc.strings_size = *((size_t *)ptr);
+    ptr += sizeof(size_t);
     
-    loc.offset_table = (size_t *)loc.file_buffer;
-    loc.string_data = loc.file_buffer + header_size;
-    loc.data_size = file_size - header_size;
+    // Read strings
+    loc.strings = ptr;
     
     return loc;
 }
 
 LOCAPI const char *loc_get_string(loc_file *loc, const char *english_key) {
-    if(!loc || !loc->offset_table || !loc->string_data || loc->table_size == 0) {
+    if(!loc || !loc->bucket_offset_table || !loc->strings || loc->bucket_count == 0) {
         return NULL;
     }
     
+    // Hash the English key
     uint32_t hash = loc_hash_string(english_key);
-    size_t index = hash % loc->table_size;
-    size_t offset = loc->offset_table[index];
+    size_t bucket_index = hash % loc->bucket_count;
     
-    /* Offset is relative to string_data */
-    if(offset >= loc->data_size) {
-        return NULL;
+    // Get the bucket
+    size_t bucket_offset = loc->bucket_offset_table[bucket_index];
+    unsigned char *bucket_ptr = loc->bucket_list + bucket_offset;
+    
+    // Read bucket: count followed by offsets
+    size_t count = *((size_t *)bucket_ptr);
+    bucket_ptr += sizeof(size_t);
+    size_t *offsets = (size_t *)bucket_ptr;
+    
+    // Search through the bucket for matching English key
+    for(size_t i = 0; i < count; i++) {
+        size_t string_offset = offsets[i];
+        if(string_offset >= loc->strings_size) {
+            continue;  // Invalid offset
+        }
+        
+        // Format: [english_key:null-terminated][localized_string:null-terminated]
+        const char *stored_english = (const char *)(loc->strings + string_offset);
+        
+        // Compare English keys
+        if(loc_strcmp(stored_english, english_key) == 0) {
+            // Found a match! Skip past the English key to get the localized string
+            size_t english_len = loc_strlen(stored_english);
+            return stored_english + english_len + 1;  // +1 for null terminator
+        }
     }
     
-    return (const char *)(loc->string_data + offset);
+    return NULL;  // Not found
 }
 
 LOCAPI void loc_free(loc_file *loc) {
     if(loc && loc->file_buffer) {
         free(loc->file_buffer);
         loc->file_buffer = NULL;
-        loc->offset_table = NULL;
-        loc->string_data = NULL;
-        loc->table_size = 0;
-        loc->data_size = 0;
+        loc->bucket_offset_table = NULL;
+        loc->bucket_list = NULL;
+        loc->strings = NULL;
+        loc->bucket_count = 0;
+        loc->bucket_list_size = 0;
+        loc->strings_size = 0;
     }
 }
 

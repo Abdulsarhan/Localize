@@ -6,9 +6,9 @@ Limitations: This format only works if all of your strings are utf-8
 This library is made up of the generator and the runtime loader.
 loc_file_gen.c is the generator and loc.h is the loader.
 The generator takes in a file where you can type in all the strings that you want in all the languages that you want.
-And converts it to a custom file format that has an offset table and the strings.
-We avoid hash collisions in the offset table by making the table 8x bigger than what is necessary.
-This made the implementation simpler, but if it presents any problems, I am happy to change it to use closed / open addressing.
+And converts it to a custom binary file format that gets loaded at runtime.
+You don't have to understand the generated file format to use this library.
+But if you're interested, loc_file_gen.c has some documentation about that at the top of the file.
 To compile the generator, just do:
 `` cc loc_file_gen.c -o loc_gen ``
 To use the loader, define LOC_IMPLEMENTATION in one file, and include in all the others.
