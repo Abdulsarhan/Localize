@@ -86,7 +86,6 @@ LOCAPI void loc_free(loc_file *loc);
     #include <fcntl.h>
 #endif
 
-/* FNV-1a hash function - must match the one used during generation */
 static uint32_t loc_hash_string(const char *str) {
     uint32_t hash = 2166136261u;
     const unsigned char *s = (const unsigned char *)str;
@@ -204,28 +203,22 @@ LOCAPI loc_file loc_load(const char *file_path) {
     
     unsigned char *ptr = loc.file_buffer;
     
-    // Read bucket offset table size
     size_t bucket_offset_table_size = *((size_t *)ptr);
     ptr += sizeof(size_t);
     
-    // Read bucket offset table
     loc.bucket_offset_table = (size_t *)ptr;
     loc.bucket_count = bucket_offset_table_size / sizeof(size_t);
     ptr += bucket_offset_table_size;
     
-    // Read bucket list size
     loc.bucket_list_size = *((size_t *)ptr);
     ptr += sizeof(size_t);
     
-    // Read bucket list
     loc.bucket_list = ptr;
     ptr += loc.bucket_list_size;
     
-    // Read strings size
     loc.strings_size = *((size_t *)ptr);
     ptr += sizeof(size_t);
     
-    // Read strings
     loc.strings = ptr;
     
     return loc;
@@ -236,11 +229,9 @@ LOCAPI const char *loc_get_string(loc_file *loc, const char *english_key) {
         return NULL;
     }
     
-    // Hash the English key
     uint32_t hash = loc_hash_string(english_key);
     size_t bucket_index = hash % loc->bucket_count;
     
-    // Get the bucket
     size_t bucket_offset = loc->bucket_offset_table[bucket_index];
     unsigned char *bucket_ptr = loc->bucket_list + bucket_offset;
     
@@ -249,7 +240,6 @@ LOCAPI const char *loc_get_string(loc_file *loc, const char *english_key) {
     bucket_ptr += sizeof(size_t);
     size_t *offsets = (size_t *)bucket_ptr;
     
-    // Search through the bucket for matching English key
     for(size_t i = 0; i < count; i++) {
         size_t string_offset = offsets[i];
         if(string_offset >= loc->strings_size) {
@@ -259,7 +249,6 @@ LOCAPI const char *loc_get_string(loc_file *loc, const char *english_key) {
         // Format: [english_key:null-terminated][localized_string:null-terminated]
         const char *stored_english = (const char *)(loc->strings + string_offset);
         
-        // Compare English keys
         if(loc_strcmp(stored_english, english_key) == 0) {
             // Found a match! Skip past the English key to get the localized string
             size_t english_len = loc_strlen(stored_english);

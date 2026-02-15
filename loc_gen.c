@@ -368,8 +368,8 @@ static loc_bool loc_write_entire_file(const char *file_path, size_t file_size, c
 #endif
 }
 
-/* consumes a value in the pipe-delimited file */
-static string consume_value(unsigned char **at, unsigned char *end) {
+/* consumes a string in the pipe-delimited file */
+static string consume_string(unsigned char **at, unsigned char *end) {
     string string = {0};
     
     // Skip leading whitespace
@@ -424,7 +424,6 @@ static uint32_t fnv1a_hash(string string) {
 static void unescape_and_copy(unsigned char *dest, size_t *dest_size, unsigned char *src, size_t src_len) {
     for(size_t i = 0; i < src_len; i++) {
         if(src[i] == '|' && i + 1 < src_len && src[i + 1] == '|') {
-            // Found ||, write single | and skip next char
             dest[(*dest_size)++] = '|';
             i++;  // Skip the second pipe
         } else {
@@ -456,8 +455,7 @@ int main(int argc, char **argv) {
 
     language_count = argc - 2;
     
-    // Reserve 1GB of virtual memory
-    arena = loc_arena_init(1024 * 1024 * 1024);
+    arena = loc_arena_init(1024 * 1024 * 1024 * 16);
 
     input = loc_read_entire_file(arena, argv[1], &input_size);
     if(!input) {
@@ -472,21 +470,19 @@ int main(int argc, char **argv) {
     size_t row_count = 0;
     
     while(at < end) {
-        string first_value = consume_value(&at, end);
+        string first_value = consume_string(&at, end);
         if(first_value.len == 0) break;
         
         for(int i = 1; i < language_count; i++) {
-            consume_value(&at, end);
+            consume_string(&at, end);
         }
         row_count++;
     }
 
     printf("Found %zu strings\n", row_count);
 
-    // Allocate bucket offset table (one entry per string)
     size_t bucket_table_size = row_count;
     
-    // Allocate string buffers for each language
     typedef struct {
         unsigned char *data;
         size_t size;
@@ -518,12 +514,11 @@ int main(int argc, char **argv) {
         }
         
         for(int i = 0; i < language_count; i++) {
-            values[i] = consume_value(&at, end);
+            values[i] = consume_string(&at, end);
         }
         
         if(values[0].len == 0) break;
         
-        // Hash the English string
         uint32_t hash = fnv1a_hash(values[0]);
         uint32_t bucket_index = hash % bucket_table_size;
         
@@ -546,15 +541,13 @@ int main(int argc, char **argv) {
             b->offsets[b->count] = lang_buffers[lang_idx].size;
             b->count++;
             
-            // Store format: [english_key:null-terminated][localized_string:null-terminated]
+            // Storage format: [english_key:null-terminated][localized_string:null-terminated]
             // Write English key first (for verification)
-            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size,
-                            values[0].value, values[0].len);
+            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size, values[0].value, values[0].len);
             lang_buffers[lang_idx].data[lang_buffers[lang_idx].size++] = '\0';
             
             // Then write localized string
-            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size,
-                            values[lang_idx].value, values[lang_idx].len);
+            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size, values[lang_idx].value, values[lang_idx].len);
             
             // Add null terminator
             lang_buffers[lang_idx].data[lang_buffers[lang_idx].size++] = '\0';
