@@ -368,46 +368,50 @@ static loc_bool loc_write_entire_file(const char *file_path, size_t file_size, c
 #endif
 }
 
-/* consumes a string in the pipe-delimited file */
+/* Skip past end-of-line (\r\n or \n). */
+static void consume_newline(unsigned char **at, unsigned char *end) {
+    if (*at != end && **at == '\r') (*at)++;
+    if (*at != end && **at == '\n') (*at)++;
+}
+
+/* Consume one field in the pipe-delimited file.
+ * Fields are separated by '|'; rows end at '\n' / '\r\n'.
+ * Use '||' to embed a literal pipe. */
 static string consume_string(unsigned char **at, unsigned char *end) {
     string string = {0};
-    
-    // Skip leading whitespace
-    while(*at != end && (**at == ' ' || **at == '\t')) {
-        (*at)++;
-    }
-    
+
+    /* Skip leading horizontal whitespace */
+    while (*at != end && (**at == ' ' || **at == '\t')) (*at)++;
+
+    /* Sitting on a row terminator or EOF: return empty string. */
+    if (*at == end || **at == '\n' || **at == '\r') return string;
+
     string.value = *at;
-    
-    // Consume until we hit a non-escaped pipe or end of file
-    while(*at != end) {
-        if(**at == '|') {
-            // Check if it's an escaped pipe (||)
-            if(*at + 1 != end && *(*at + 1) == '|') {
-                // Skip both pipes
-                (*at) += 2;
+
+    /* Consume until pipe, newline, or EOF */
+    while (*at != end && **at != '\n' && **at != '\r') {
+        if (**at == '|') {
+            if (*at + 1 != end && *(*at + 1) == '|') {
+                (*at) += 2; /* escaped pipe */
             } else {
-                // Single pipe is a delimiter, stop here
-                break;
+                break; /* field delimiter */
             }
         } else {
             (*at)++;
         }
     }
-    
-    // Trim trailing whitespace from the value
+
+    /* Trim trailing horizontal whitespace */
     unsigned char *value_end = *at;
-    while(value_end > string.value && (*(value_end - 1) == ' ' || *(value_end - 1) == '\t')) {
+    while (value_end > string.value &&
+           (*(value_end - 1) == ' ' || *(value_end - 1) == '\t')) {
         value_end--;
     }
-    
     string.len = value_end - string.value;
-    
-    // Skip the pipe delimiter if present
-    if(*at != end && **at == '|') {
-        (*at)++;
-    }
-    
+
+    /* Consume the pipe delimiter (newlines are left for consume_newline) */
+    if (*at != end && **at == '|') (*at)++;
+
     return string;
 }
 
@@ -432,10 +436,20 @@ static void unescape_and_copy(unsigned char *dest, size_t *dest_size, unsigned c
     }
 }
 
-typedef struct {
-    size_t count;
-    size_t *offsets;
-} bucket;
+/* Sentinel value written into empty hash map slots */
+#define LOC_GEN_EMPTY_SLOT ((size_t)-1)
+
+/*
+ * Compute the slot count for an open-addressing table given row_count entries.
+ * We target ~70% load: slot_count = ceil(row_count * 10 / 7), then round up
+ * to the next odd number so it shares no small factors with common hash ranges.
+ */
+static size_t loc_compute_slot_count(size_t row_count) {
+    size_t n = (row_count * 10 + 6) / 7; /* ceil(row_count * 10/7) */
+    if (n == 0) n = 1;
+    if (n % 2 == 0) n++;  /* make odd */
+    return n;
+}
 
 int main(int argc, char **argv) {
     size_t input_size = 0;
@@ -454,7 +468,7 @@ int main(int argc, char **argv) {
     }
 
     language_count = argc - 2;
-    
+
     arena = loc_arena_init(1024 * 1024 * 1024 * 16);
 
     input = loc_read_entire_file(arena, argv[1], &input_size);
@@ -464,47 +478,50 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // First pass: count rows
+    /* First pass: count rows */
     at = input;
     end = input + input_size;
     size_t row_count = 0;
-    
+
     while(at < end) {
         string first_value = consume_string(&at, end);
-        if(first_value.len == 0) break;
-        
-        for(int i = 1; i < language_count; i++) {
-            consume_string(&at, end);
-        }
+        if(first_value.len == 0) { consume_newline(&at, end); if (at >= end) break; continue; }
+        for(int i = 1; i < language_count; i++) consume_string(&at, end);
+        consume_newline(&at, end);
         row_count++;
     }
 
     printf("Found %zu strings\n", row_count);
 
-    size_t bucket_table_size = row_count;
-    
+    size_t slot_count = loc_compute_slot_count(row_count);
+
     typedef struct {
         unsigned char *data;
         size_t size;
         size_t capacity;
     } language_buffer;
-    
+
     language_buffer *lang_buffers = LOC_ARENA_PUSH_ARRAY_ZERO(arena, language_buffer, language_count);
     for(int i = 0; i < language_count; i++) {
-        lang_buffers[i].capacity = input_size;
+        lang_buffers[i].capacity = input_size * 2 + 64;
         lang_buffers[i].data = LOC_ARENA_PUSH_ARRAY(arena, unsigned char, lang_buffers[i].capacity);
         lang_buffers[i].size = 0;
     }
 
-    // Allocate buckets for each language
-    bucket **lang_buckets = LOC_ARENA_PUSH_ARRAY(arena, bucket*, language_count);
+    /*
+     * Per-language open-addressing hash maps.
+     * Each map is slot_count size_t values, initialised to LOC_GEN_EMPTY_SLOT.
+     * Each occupied slot holds an offset into that language's string buffer.
+     */
+    size_t **lang_maps = LOC_ARENA_PUSH_ARRAY(arena, size_t*, language_count);
     for(int i = 0; i < language_count; i++) {
-        lang_buckets[i] = LOC_ARENA_PUSH_ARRAY_ZERO(arena, bucket, bucket_table_size);
+        lang_maps[i] = LOC_ARENA_PUSH_ARRAY(arena, size_t, slot_count);
+        for(size_t s = 0; s < slot_count; s++) lang_maps[i][s] = LOC_GEN_EMPTY_SLOT;
     }
 
-    // Second pass: build buckets and strings
+    /* Second pass: build hash maps and string buffers */
     at = input;
-    
+
     while(at < end) {
         string values[32];
         if(language_count > 32) {
@@ -512,64 +529,52 @@ int main(int argc, char **argv) {
             loc_arena_destroy(arena);
             return -1;
         }
-        
-        for(int i = 0; i < language_count; i++) {
-            values[i] = consume_string(&at, end);
-        }
-        
-        if(values[0].len == 0) break;
-        
+
+        for(int i = 0; i < language_count; i++) values[i] = consume_string(&at, end);
+        consume_newline(&at, end);
+        if(values[0].len == 0) { if (at >= end) break; continue; }
+
         uint32_t hash = fnv1a_hash(values[0]);
-        uint32_t bucket_index = hash % bucket_table_size;
-        
-        // For each language, add offset to bucket and store string
+
         for(int lang_idx = 0; lang_idx < language_count; lang_idx++) {
-            bucket *b = &lang_buckets[lang_idx][bucket_index];
-            
-            // Expand bucket offsets array
-            if(b->count == 0) {
-                b->offsets = LOC_ARENA_PUSH_ARRAY(arena, size_t, 1);
-            } else {
-                size_t *new_offsets = LOC_ARENA_PUSH_ARRAY(arena, size_t, b->count + 1);
-                for(size_t i = 0; i < b->count; i++) {
-                    new_offsets[i] = b->offsets[i];
+            size_t *map = lang_maps[lang_idx];
+
+            /* Record the offset this entry will occupy in the string buffer */
+            size_t string_offset = lang_buffers[lang_idx].size;
+
+            /* Linear probe to find an empty slot */
+            size_t slot_index = hash % slot_count;
+            for(size_t probe = 0; probe < slot_count; probe++) {
+                if(map[slot_index] == LOC_GEN_EMPTY_SLOT) {
+                    map[slot_index] = string_offset;
+                    break;
                 }
-                b->offsets = new_offsets;
+                slot_index = (slot_index + 1) % slot_count;
             }
-            
-            // Store offset to this string entry
-            b->offsets[b->count] = lang_buffers[lang_idx].size;
-            b->count++;
-            
-            // Storage format: [english_key:null-terminated][localized_string:null-terminated]
-            // Write English key first (for verification)
-            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size, values[0].value, values[0].len);
+
+            /* Write entry: [english_key\0][localized_string\0] */
+            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size,
+                              values[0].value, values[0].len);
             lang_buffers[lang_idx].data[lang_buffers[lang_idx].size++] = '\0';
-            
-            // Then write localized string
-            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size, values[lang_idx].value, values[lang_idx].len);
-            
-            // Add null terminator
+
+            unescape_and_copy(lang_buffers[lang_idx].data, &lang_buffers[lang_idx].size,
+                              values[lang_idx].value, values[lang_idx].len);
             lang_buffers[lang_idx].data[lang_buffers[lang_idx].size++] = '\0';
         }
     }
 
-    // Write output files for each language
+    /* Write output files for each language */
     for(int lang_idx = 0; lang_idx < language_count; lang_idx++) {
         char output_path[512];
         const char *input_path = argv[1];
-        const char *lang_code = argv[2 + lang_idx];
-        
-        // Create output filename
-        const char *dot = input_path;
-        const char *last_dot = NULL;
-        while(*dot) {
-            if(*dot == '.') last_dot = dot;
-            dot++;
-        }
-        
+        const char *lang_code  = argv[2 + lang_idx];
+
+        /* Build output filename: strip extension, append .LANG.loc */
+        const char *dot = input_path, *last_dot = NULL;
+        while(*dot) { if(*dot == '.') last_dot = dot; dot++; }
+
         if(last_dot) {
-            size_t prefix_len = last_dot - input_path;
+            size_t prefix_len = (size_t)(last_dot - input_path);
             loc_memcpy(output_path, input_path, prefix_len);
             output_path[prefix_len] = '.';
             size_t lang_len = loc_strlen(lang_code);
@@ -583,80 +588,46 @@ int main(int argc, char **argv) {
             loc_memcpy(output_path + path_len + 1, lang_code, lang_len);
             loc_memcpy(output_path + path_len + 1 + lang_len, ".loc", 5);
         }
-        
-        // Calculate sizes for each chunk
-        // Format: [bucket_offset_table_size][bucket_offset_table][bucket_list_size][bucket_list][strings_size][strings]
-        
-        size_t bucket_offset_table_size = bucket_table_size * sizeof(size_t);
-        
-        // Calculate bucket list size
-        size_t bucket_list_size = 0;
-        for(size_t i = 0; i < bucket_table_size; i++) {
-            bucket *b = &lang_buckets[lang_idx][i];
-            bucket_list_size += sizeof(size_t) + (b->count * sizeof(size_t));
-        }
-        
+
+        /*
+         * File layout:
+         *   [slot_count   : size_t                      ]
+         *   [hash_map     : slot_count * size_t          ]
+         *   [strings_size : size_t                      ]
+         *   [strings      : strings_size bytes           ]
+         */
+        size_t map_bytes    = slot_count * sizeof(size_t);
         size_t strings_size = lang_buffers[lang_idx].size;
-        
-        size_t total_size = sizeof(size_t) + bucket_offset_table_size +
-                           sizeof(size_t) + bucket_list_size +
-                           sizeof(size_t) + strings_size;
-        
-        // Build output buffer
+        size_t total_size   = sizeof(size_t) + map_bytes + sizeof(size_t) + strings_size;
+
         unsigned char *output = LOC_ARENA_PUSH_ARRAY(arena, unsigned char, total_size);
         size_t output_pos = 0;
-        
-        // Write bucket offset table size
-        *((size_t*)(output + output_pos)) = bucket_offset_table_size;
+
+        /* slot_count */
+        *((size_t *)(output + output_pos)) = slot_count;
         output_pos += sizeof(size_t);
-        
-        // Write bucket offset table
-        size_t *bucket_offsets = (size_t*)(output + output_pos);
-        size_t current_bucket_offset = 0;
-        
-        for(size_t i = 0; i < bucket_table_size; i++) {
-            bucket_offsets[i] = current_bucket_offset;
-            bucket *b = &lang_buckets[lang_idx][i];
-            current_bucket_offset += sizeof(size_t) + (b->count * sizeof(size_t));
-        }
-        output_pos += bucket_offset_table_size;
-        
-        // Write bucket list size
-        *((size_t*)(output + output_pos)) = bucket_list_size;
+
+        /* hash_map */
+        loc_memcpy(output + output_pos, lang_maps[lang_idx], map_bytes);
+        output_pos += map_bytes;
+
+        /* strings_size */
+        *((size_t *)(output + output_pos)) = strings_size;
         output_pos += sizeof(size_t);
-        
-        // Write bucket list
-        for(size_t i = 0; i < bucket_table_size; i++) {
-            bucket *b = &lang_buckets[lang_idx][i];
-            
-            // Write count
-            *((size_t*)(output + output_pos)) = b->count;
-            output_pos += sizeof(size_t);
-            
-            // Write offsets
-            for(size_t j = 0; j < b->count; j++) {
-                *((size_t*)(output + output_pos)) = b->offsets[j];
-                output_pos += sizeof(size_t);
-            }
-        }
-        
-        // Write strings size
-        *((size_t*)(output + output_pos)) = strings_size;
-        output_pos += sizeof(size_t);
-        
-        // Write strings
+
+        /* strings */
         loc_memcpy(output + output_pos, lang_buffers[lang_idx].data, strings_size);
-        
+
         if(!loc_write_entire_file(output_path, total_size, (char*)output)) {
             printf("Failed to write output file: %s\n", output_path);
             loc_arena_destroy(arena);
             return -1;
         }
-        
-        printf("Successfully created %s (%zu strings, %zu bytes)\n",
-               output_path, row_count, total_size);
+
+        printf("Successfully created %s (%zu strings, %zu slots, %zu bytes)\n",
+               output_path, row_count, slot_count, total_size);
     }
-    
+
     loc_arena_destroy(arena);
     return 0;
 }
